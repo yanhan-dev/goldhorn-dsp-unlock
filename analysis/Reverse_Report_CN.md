@@ -2,13 +2,13 @@
 
 ## 目标
 
-- 样本: `D:\ida\GOLDHORN_DSP_1.9.3(12656).exe`
+- 样本: `GOLDHORN_DSP_1.9.3(12656).exe`
 - 目标: 判断为什么 `upx -d` 失败，并给出最短可行脱壳路径
 
 ## FACTS
 
 - `diec` 识别结果为 `Packer: UPX[modified]`。
-- IDA 当前打开的输入为 `D:\ida\GOLDHORN_DSP_1.9.3(12656).exe`，`ImageBase = 0x400000`，`PE32`。
+- IDA 当前打开的输入为 `GOLDHORN_DSP_1.9.3(12656).exe`，`ImageBase = 0x400000`，`PE32`。
 - 样本节表在文件偏移 `0x248` 开始，共 3 节：
 - 第 0 节: 名称为空，`VA=0x00001000`，`VSz=0x00C58000`，`RawPtr=0x00000400`，`RawSz=0x00000000`，`Chars=0xE0000080`
 - 第 1 节: 名称为空，`VA=0x00C59000`，`VSz=0x00A2C000`，`RawPtr=0x00000400`，`RawSz=0x00A2BE00`，`Chars=0xE0000040`
