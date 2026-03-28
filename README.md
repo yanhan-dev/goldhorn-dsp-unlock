@@ -73,7 +73,6 @@ if (Ams.isNeedVerifyDevice()) {
 5. 修复 ASLR 标志 → 可稳定运行的脱壳 exe
 
 **遇到的坑：**
-- PE32（32位）程序需要用 x32dbg，不是 x64dbg
 - ASLR 导致运行时基址不是 0x400000，需要重新计算所有地址
 - apphelp.dll 的 DPI shim 劫持了 GetDC/BitBlt/Direct3DCreate9，导致 dump 中包含 shim 地址
 - OEP 的 RVA 计算错误（误将 IDA 的绝对 VA 当作 RVA）
@@ -95,10 +94,10 @@ if (Ams.isNeedVerifyDevice()) {
 
 | 原始代码 | 替换为 | 数量 |
 |---------|-------|------|
-| `Ams.isNeedVerifyDevice()` | `(false                 )` | 37 处 |
-| `Ams.isVerifyPass()` | `(true            )` | 4 处 |
-| `Ams.setVerifyPass(false)` | `Ams.setVerifyPass(true )` | 3 处 |
-| `Ams.isNeedReportDevice()` | `(false                 )` | 1 处 |
+| `Ams.isNeedVerifyDevice()` | `(false)`                  | 37 处 |
+| `Ams.isVerifyPass()`       | `(true)`                   | 4 处 |
+| `Ams.setVerifyPass(false)` | `Ams.setVerifyPass(true)` | 3 处 |
+| `Ams.isNeedReportDevice()` | `(false)`                  | 1 处 |
 
 替换后重新 zlib 压缩写回 exe，新压缩体比原始小 1111 字节，完美原地覆盖。
 
@@ -119,7 +118,7 @@ python scripts/patch_verify.py
 1. 正常启动 GOLDHORN DSP（无 DEBUG_PROCESS，不触发反调试）
 2. 通过 `OpenProcess` + `ReadProcessMemory` 外部扫描进程内存
 3. 等待 Qt 解压 QML 资源后，搜索 `Ams.isNeedVerifyDevice()` 字符串
-4. 用 `WriteProcessMemory` 等长替换为 `(false                 )`
+4. 用 `WriteProcessMemory` 等长替换为 `(false)`
 5. 不修改磁盘文件，只修改进程内存
 
 **优势：**
@@ -164,4 +163,4 @@ analysis/           逆向分析文档
 
 ## 致谢
 
-本项目使用 [Claude Code](https://claude.ai/code) + [x64dbg MCP](https://github.com/Wasdubya/x64dbgMCP) 协作完成逆向分析与工具开发。
+本项目使用 [Claude Code](https://claude.ai/code) + [x64dbg MCP](https://github.com/Wasdubya/x64dbgMCP) + [IDA Pro MCP](https://github.com/HexRaysSA/ida-claude-plugins) 协作完成逆向分析与工具开发。
