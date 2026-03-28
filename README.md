@@ -163,4 +163,4 @@ analysis/           逆向分析文档
 
 ## 致谢
 
-本项目使用 [Claude Code](https://claude.ai/code) + [x64dbg MCP](https://github.com/Wasdubya/x64dbgMCP) + [IDA Pro MCP](https://github.com/HexRaysSA/ida-claude-plugins) 协作完成逆向分析与工具开发。
+本项目使用 [Claude Code](https://claude.ai/code) + [x64dbg MCP](https://github.com/Wasdubya/x64dbgMCP) + [IDA Claude Plugins](https://github.com/HexRaysSA/ida-claude-plugins) 协作完成逆向分析与工具开发。
