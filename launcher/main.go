@@ -432,44 +432,34 @@ func doLaunchAndPatch() {
 			return
 		}
 
-		appendLog("Scanning memory for verification code...")
-
-		maxAttempts := 60
-		patched := false
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			var exitCode uint32
-			procGetExitCodeProcess.Call(hMem, uintptr(unsafe.Pointer(&exitCode)))
-			if exitCode != STILL_ACTIVE {
-				appendLog(fmt.Sprintf("Process exited (code=0x%X)", exitCode))
-				break
-			}
-			count, _ := scanAndPatch(syscall.Handle(hMem))
-			if count > 0 {
-				appendLog(fmt.Sprintf("SUCCESS! Patched %d locations", count))
-				procPostMessage.Call(uintptr(hwndMain), WM_APP_SETSTATUS, 2, uintptr(count))
-				patched = true
-				break
-			}
-			if attempt%4 == 0 {
-				appendLog(fmt.Sprintf("Scanning... attempt %d/%d", attempt, maxAttempts))
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-
-		if !patched {
-			appendLog("Warning: verification code not found")
-		}
-
-		// Monitor: poll process status without blocking
-		appendLog("Monitoring DSP process...")
+		appendLog("Continuous memory guard active...")
+		appendLog("Will keep patching until DSP exits.")
 		procPostMessage.Call(uintptr(hwndMain), WM_APP_SETSTATUS, 3, 0)
+
+		totalPatched := 0
+		scanCount := 0
 		for {
 			var exitCode uint32
 			procGetExitCodeProcess.Call(hMem, uintptr(unsafe.Pointer(&exitCode)))
 			if exitCode != STILL_ACTIVE {
 				break
 			}
-			time.Sleep(500 * time.Millisecond)
+
+			count, _ := scanAndPatch(syscall.Handle(hMem))
+			scanCount++
+			if count > 0 {
+				totalPatched += count
+				appendLog(fmt.Sprintf("Patched %d locations (total: %d)", count, totalPatched))
+				procPostMessage.Call(uintptr(hwndMain), WM_APP_SETSTATUS, 2, uintptr(totalPatched))
+			}
+
+			// First 10 seconds: scan every 500ms (catch initial QML load)
+			// After that: scan every 2 seconds (catch lazy-loaded components)
+			if scanCount < 20 {
+				time.Sleep(500 * time.Millisecond)
+			} else {
+				time.Sleep(2 * time.Second)
+			}
 		}
 
 		procCloseHandle.Call(hMem)
