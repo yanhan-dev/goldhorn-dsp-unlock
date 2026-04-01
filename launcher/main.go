@@ -311,9 +311,20 @@ func launchProcess(exePath string) (syscall.Handle, uint32, error) {
 	return pi.Process, pi.ProcessId, nil
 }
 
+// countingReader wraps a reader and counts bytes read
+type countingReader struct {
+	r     io.Reader
+	count int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.count += int64(n)
+	return n, err
+}
+
 // patchCompressedBlock: decompress zlib data, apply patches, recompress, write back
 func patchCompressedBlock(hProc syscall.Handle, addr uintptr, maxSize int) (int, error) {
-	// Read the compressed block from process memory
 	buf := make([]byte, maxSize)
 	var bytesRead uintptr
 	ret, _, _ := procReadProcessMemory.Call(
@@ -326,8 +337,9 @@ func patchCompressedBlock(hProc syscall.Handle, addr uintptr, maxSize int) (int,
 		return 0, fmt.Errorf("read failed")
 	}
 
-	// Decompress
-	r, err := zlib.NewReader(bytes.NewReader(buf[:bytesRead]))
+	// Use counting reader to find exact compressed size
+	cr := &countingReader{r: bytes.NewReader(buf[:bytesRead])}
+	r, err := zlib.NewReader(cr)
 	if err != nil {
 		return 0, err
 	}
@@ -336,10 +348,10 @@ func patchCompressedBlock(hProc syscall.Handle, addr uintptr, maxSize int) (int,
 	if err != nil {
 		return 0, err
 	}
+	origCompressedSize := int(cr.count) // Exact bytes consumed by zlib
 
-	// Check if this block contains verification code
 	if !bytes.Contains(decompressed, []byte("isNeedVerifyDevice")) {
-		return 0, nil // Not the right block
+		return 0, nil
 	}
 
 	// Apply patches
@@ -362,29 +374,29 @@ func patchCompressedBlock(hProc syscall.Handle, addr uintptr, maxSize int) (int,
 	w.Close()
 
 	newData := compressed.Bytes()
-	if len(newData) > maxSize {
-		return 0, fmt.Errorf("recompressed too large: %d > %d", len(newData), maxSize)
+	if len(newData) > origCompressedSize {
+		return 0, fmt.Errorf("recompressed too large: %d > %d", len(newData), origCompressedSize)
 	}
 
-	// Pad to original size with zeros
-	padded := make([]byte, maxSize)
+	// Pad to EXACT original compressed size only
+	padded := make([]byte, origCompressedSize)
 	copy(padded, newData)
 
-	// Write back
+	// Write back exactly origCompressedSize bytes
 	var oldProtect uint32
 	procVirtualProtectEx.Call(
-		uintptr(hProc), addr, uintptr(maxSize),
+		uintptr(hProc), addr, uintptr(origCompressedSize),
 		PAGE_EXECUTE_READWRITE, uintptr(unsafe.Pointer(&oldProtect)),
 	)
 	var written uintptr
 	procWriteProcessMemory.Call(
 		uintptr(hProc), addr,
 		uintptr(unsafe.Pointer(&padded[0])),
-		uintptr(maxSize),
+		uintptr(origCompressedSize),
 		uintptr(unsafe.Pointer(&written)),
 	)
 	procVirtualProtectEx.Call(
-		uintptr(hProc), addr, uintptr(maxSize),
+		uintptr(hProc), addr, uintptr(origCompressedSize),
 		uintptr(oldProtect), uintptr(unsafe.Pointer(&oldProtect)),
 	)
 
