@@ -116,15 +116,18 @@ python scripts/patch_verify.py
 1.9MB 单文件 Go 程序，无需运行时依赖，启动后自动：
 
 1. 正常启动 GOLDHORN DSP（无 DEBUG_PROCESS，不触发反调试）
-2. 通过 `OpenProcess` + `ReadProcessMemory` 外部扫描进程内存
-3. 等待 Qt 解压 QML 资源后，搜索 `Ams.isNeedVerifyDevice()` 字符串
-4. 用 `WriteProcessMemory` 等长替换为 `(false)`
-5. 不修改磁盘文件，只修改进程内存
+2. 通过 `OpenProcess` + `ReadProcessMemory` 外部持续扫描进程内存
+3. 搜索方法名 `isNeedVerifyDevice` 的 **ASCII + UTF-16LE** 双编码（覆盖 QML 源码和编译后字节码字符串表）
+4. 用 `WriteProcessMemory` 等长替换为无效名 `_xNeedVerifyDevice`，使 Qt 元对象方法查找失败 → 返回 `undefined`（JS 中为 falsy）→ 验证分支不执行
+5. 每 2 秒持续扫描，捕获动态加载的 QML 组件（如连接 DSP 设备时按需加载的验证界面）
+6. 不修改磁盘文件，只修改进程内存
 
 **优势：**
-- 适用于原版带壳 exe（UPX 解压后 Qt 再解压 QML，hook 在第二层生效）
-- 软件更新后只要函数名不变，hook 依然有效
-- 不触发任何反调试检测
+- 适用于原版带壳 exe 和脱壳版（无需预处理）
+- 软件更新后只要方法名不变，hook 依然有效
+- 不触发任何反调试检测（不使用 DEBUG_PROCESS）
+- 持续守护，覆盖 Qt 按需加载的 QML 组件
+- 同时 patch ASCII 和 UTF-16LE 编码（约 80 处）
 - 单文件绿色运行，1.9MB
 
 **使用方法：**
