@@ -116,17 +116,29 @@ const (
 	TIMER_LOG      = 2
 )
 
-// Patch patterns: target raw method name strings in bytecode string tables
-// Replace with invalid names so method lookup returns undefined (falsy in JS)
-// Equal length replacements to avoid corrupting string table offsets
-var patches = []struct {
-	old []byte
-	new []byte
-}{
-	// 18 chars each - corrupt method name so QMetaObject lookup fails → undefined → false
-	{[]byte("isNeedVerifyDevice"), []byte("_xNeedVerifyDevice")},
-	{[]byte("isNeedReportDevice"), []byte("_xNeedReportDevice")},
+// toUTF16LE converts ASCII to UTF-16LE bytes
+func toUTF16LE(s string) []byte {
+	b := make([]byte, len(s)*2)
+	for i := 0; i < len(s); i++ {
+		b[i*2] = s[i]
+		b[i*2+1] = 0
+	}
+	return b
 }
+
+var patches = func() []struct{ old, new []byte } {
+	type pair struct{ o, n string }
+	names := []pair{
+		{"isNeedVerifyDevice", "_xNeedVerifyDevice"},
+		{"isNeedReportDevice", "_xNeedReportDevice"},
+	}
+	var r []struct{ old, new []byte }
+	for _, p := range names {
+		r = append(r, struct{ old, new []byte }{[]byte(p.o), []byte(p.n)})           // ASCII
+		r = append(r, struct{ old, new []byte }{toUTF16LE(p.o), toUTF16LE(p.n)})     // UTF-16LE
+	}
+	return r
+}()
 
 type MEMORY_BASIC_INFORMATION struct {
 	BaseAddress       uintptr
