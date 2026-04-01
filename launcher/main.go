@@ -2,14 +2,16 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"runtime"
 	"unsafe"
 )
 
@@ -116,16 +118,21 @@ const (
 	TIMER_LOG      = 2
 )
 
-// Patch patterns: old -> new (equal length)
+// Patch patterns for decompressed QML text (equal length replacements)
 var patches = []struct {
 	old []byte
 	new []byte
-	desc string
 }{
-	{[]byte("Ams.isNeedVerifyDevice()"), []byte("(false                 )"), "isNeedVerifyDevice->false"},
-	{[]byte("Ams.isVerifyPass()"), []byte("(true            )"), "isVerifyPass->true"},
-	{[]byte("Ams.setVerifyPass(false)"), []byte("Ams.setVerifyPass(true )"), "setVerifyPass(true)"},
-	{[]byte("Ams.isNeedReportDevice()"), []byte("(false                 )"), "isNeedReportDevice->false"},
+	{[]byte("Ams.isNeedVerifyDevice()"), []byte("(false                 )")},
+	{[]byte("Ams.isVerifyPass()"), []byte("(true            )")},
+	{[]byte("Ams.setVerifyPass(false)"), []byte("Ams.setVerifyPass(true )")},
+	{[]byte("Ams.isNeedReportDevice()"), []byte("(false                 )")},
+}
+
+// Zlib header signature for the verify_qml compressed block (first 8 bytes)
+// 78 DA = zlib best compression, followed by unique content bytes
+var zlibSignatures = [][]byte{
+	{0x78, 0xda, 0xec, 0xbd, 0x7d, 0x77, 0x13, 0x47}, // verify_qml
 }
 
 type MEMORY_BASIC_INFORMATION struct {
@@ -304,7 +311,88 @@ func launchProcess(exePath string) (syscall.Handle, uint32, error) {
 	return pi.Process, pi.ProcessId, nil
 }
 
-func scanAndPatch(hProc syscall.Handle) (int, error) {
+// patchCompressedBlock: decompress zlib data, apply patches, recompress, write back
+func patchCompressedBlock(hProc syscall.Handle, addr uintptr, maxSize int) (int, error) {
+	// Read the compressed block from process memory
+	buf := make([]byte, maxSize)
+	var bytesRead uintptr
+	ret, _, _ := procReadProcessMemory.Call(
+		uintptr(hProc), addr,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(maxSize),
+		uintptr(unsafe.Pointer(&bytesRead)),
+	)
+	if ret == 0 || bytesRead < 100 {
+		return 0, fmt.Errorf("read failed")
+	}
+
+	// Decompress
+	r, err := zlib.NewReader(bytes.NewReader(buf[:bytesRead]))
+	if err != nil {
+		return 0, err
+	}
+	decompressed, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		return 0, err
+	}
+
+	// Check if this block contains verification code
+	if !bytes.Contains(decompressed, []byte("isNeedVerifyDevice")) {
+		return 0, nil // Not the right block
+	}
+
+	// Apply patches
+	count := 0
+	for _, p := range patches {
+		n := bytes.Count(decompressed, p.old)
+		if n > 0 {
+			decompressed = bytes.ReplaceAll(decompressed, p.old, p.new)
+			count += n
+		}
+	}
+	if count == 0 {
+		return 0, nil
+	}
+
+	// Recompress
+	var compressed bytes.Buffer
+	w, _ := zlib.NewWriterLevel(&compressed, zlib.BestCompression)
+	w.Write(decompressed)
+	w.Close()
+
+	newData := compressed.Bytes()
+	if len(newData) > maxSize {
+		return 0, fmt.Errorf("recompressed too large: %d > %d", len(newData), maxSize)
+	}
+
+	// Pad to original size with zeros
+	padded := make([]byte, maxSize)
+	copy(padded, newData)
+
+	// Write back
+	var oldProtect uint32
+	procVirtualProtectEx.Call(
+		uintptr(hProc), addr, uintptr(maxSize),
+		PAGE_EXECUTE_READWRITE, uintptr(unsafe.Pointer(&oldProtect)),
+	)
+	var written uintptr
+	procWriteProcessMemory.Call(
+		uintptr(hProc), addr,
+		uintptr(unsafe.Pointer(&padded[0])),
+		uintptr(maxSize),
+		uintptr(unsafe.Pointer(&written)),
+	)
+	procVirtualProtectEx.Call(
+		uintptr(hProc), addr, uintptr(maxSize),
+		uintptr(oldProtect), uintptr(unsafe.Pointer(&oldProtect)),
+	)
+
+	return count, nil
+}
+
+// scanForCompressedBlocks: search process memory for zlib signatures and patch them
+func scanForCompressedBlocks(hProc syscall.Handle) (int, error) {
 	totalPatched := 0
 	var addr uintptr
 	var mbi MEMORY_BASIC_INFORMATION
@@ -312,14 +400,11 @@ func scanAndPatch(hProc syscall.Handle) (int, error) {
 
 	for {
 		ret, _, _ := procVirtualQueryEx.Call(
-			uintptr(hProc),
-			addr,
-			uintptr(unsafe.Pointer(&mbi)),
-			mbiSize,
+			uintptr(hProc), addr,
+			uintptr(unsafe.Pointer(&mbi)), mbiSize,
 		)
 		if ret == 0 { break }
 
-		// Only scan committed, readable memory (skip guard/noaccess)
 		if mbi.State == MEM_COMMIT &&
 			mbi.Protect != PAGE_NOACCESS &&
 			mbi.Protect&PAGE_GUARD == 0 &&
@@ -327,57 +412,38 @@ func scanAndPatch(hProc syscall.Handle) (int, error) {
 
 			buf := make([]byte, mbi.RegionSize)
 			var bytesRead uintptr
-			ret2, _, _ := procReadProcessMemory.Call(
-				uintptr(hProc),
-				mbi.BaseAddress,
+			procReadProcessMemory.Call(
+				uintptr(hProc), mbi.BaseAddress,
 				uintptr(unsafe.Pointer(&buf[0])),
 				mbi.RegionSize,
 				uintptr(unsafe.Pointer(&bytesRead)),
 			)
-			if ret2 != 0 && bytesRead > 0 {
+			if bytesRead > 0 {
 				data := buf[:bytesRead]
-				for _, p := range patches {
+				for _, sig := range zlibSignatures {
 					offset := 0
 					for {
-						idx := bytes.Index(data[offset:], p.old)
+						idx := bytes.Index(data[offset:], sig)
 						if idx == -1 { break }
-						writeAddr := mbi.BaseAddress + uintptr(offset+idx)
-
-						// Make writable
-						var oldProtect uint32
-						procVirtualProtectEx.Call(
-							uintptr(hProc), writeAddr, uintptr(len(p.new)),
-							PAGE_EXECUTE_READWRITE,
-							uintptr(unsafe.Pointer(&oldProtect)),
-						)
-
-						// Write patch
-						var written uintptr
-						procWriteProcessMemory.Call(
-							uintptr(hProc), writeAddr,
-							uintptr(unsafe.Pointer(&p.new[0])),
-							uintptr(len(p.new)),
-							uintptr(unsafe.Pointer(&written)),
-						)
-
-						// Restore protection
-						procVirtualProtectEx.Call(
-							uintptr(hProc), writeAddr, uintptr(len(p.new)),
-							uintptr(oldProtect),
-							uintptr(unsafe.Pointer(&oldProtect)),
-						)
-
-						if written > 0 {
-							totalPatched++
+						blockAddr := mbi.BaseAddress + uintptr(offset+idx)
+						// Try to patch this compressed block (scan up to 150KB)
+						remaining := int(bytesRead) - (offset + idx)
+						scanSize := 150 * 1024
+						if remaining < scanSize {
+							scanSize = remaining
 						}
-						offset += idx + len(p.old)
+						count, err := patchCompressedBlock(hProc, blockAddr, scanSize)
+						if err == nil && count > 0 {
+							totalPatched += count
+						}
+						offset += idx + len(sig)
 					}
 				}
 			}
 		}
 
 		addr = mbi.BaseAddress + mbi.RegionSize
-		if addr < mbi.BaseAddress { break } // overflow
+		if addr < mbi.BaseAddress { break }
 	}
 	return totalPatched, nil
 }
@@ -432,8 +498,8 @@ func doLaunchAndPatch() {
 			return
 		}
 
-		appendLog("Continuous memory guard active...")
-		appendLog("Will keep patching until DSP exits.")
+		appendLog("Patching compressed QML resources...")
+		appendLog("This patches BEFORE Qt compiles QML.")
 		procPostMessage.Call(uintptr(hwndMain), WM_APP_SETSTATUS, 3, 0)
 
 		totalPatched := 0
@@ -445,20 +511,20 @@ func doLaunchAndPatch() {
 				break
 			}
 
-			count, _ := scanAndPatch(syscall.Handle(hMem))
+			count, _ := scanForCompressedBlocks(syscall.Handle(hMem))
 			scanCount++
 			if count > 0 {
 				totalPatched += count
-				appendLog(fmt.Sprintf("Patched %d locations (total: %d)", count, totalPatched))
+				appendLog(fmt.Sprintf("Patched %d items in compressed QML (total: %d)", count, totalPatched))
 				procPostMessage.Call(uintptr(hwndMain), WM_APP_SETSTATUS, 2, uintptr(totalPatched))
 			}
 
-			// First 10 seconds: scan every 500ms (catch initial QML load)
-			// After that: scan every 2 seconds (catch lazy-loaded components)
-			if scanCount < 20 {
-				time.Sleep(500 * time.Millisecond)
+			// First 15 seconds: scan every 1s (wait for UPX + Qt init)
+			// After first patch: scan every 3s (catch reloads)
+			if totalPatched == 0 && scanCount < 15 {
+				time.Sleep(1 * time.Second)
 			} else {
-				time.Sleep(2 * time.Second)
+				time.Sleep(3 * time.Second)
 			}
 		}
 
